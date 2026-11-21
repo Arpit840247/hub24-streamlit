@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import streamlit as st
 
-from connectors import CHANNELS, get_channel_map, get_sample_24h_items
+from connectors import CHANNELS, get_channel_map
 from database import (
     add_feed_item,
     authenticate_user,

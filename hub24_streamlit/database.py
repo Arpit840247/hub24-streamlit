@@ -92,6 +92,19 @@ def authenticate_user(email: str, password: str) -> Optional[Dict]:
     return None
 
 
+def item_exists(user_id: int, channel: str, title: str, sender: str) -> bool:
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM feed_items
+            WHERE user_id = ? AND channel = ? AND LOWER(title) = LOWER(?) AND LOWER(sender) = LOWER(?)
+            LIMIT 1
+            """,
+            (user_id, channel.lower(), title.strip(), sender.strip()),
+        ).fetchone()
+    return row is not None
+
+
 def add_feed_item(
     user_id: int,
     channel: str,
@@ -127,11 +140,31 @@ def get_channel_counts_24h(user_id: int) -> Dict[str, int]:
     return {row["channel"]: row["cnt"] for row in rows}
 
 
+def get_summary_24h(user_id: int) -> Dict[str, int]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT status, COUNT(*) as cnt
+            FROM feed_items
+            WHERE user_id = ? AND created_at >= ?
+            GROUP BY status
+            """,
+            (user_id, cutoff),
+        ).fetchall()
+    counts = {"unread": 0, "followup": 0, "done": 0}
+    for r in rows:
+        counts[r["status"]] = r["cnt"]
+    counts["total_24h"] = sum(counts.values())
+    return counts
+
+
 def get_feed_items(
     user_id: int,
     channel: Optional[str] = None,
     only_24h: bool = True,
     status_filter: str = "all",
+    search_query: str = "",
 ) -> List[Dict]:
     query = "SELECT * FROM feed_items WHERE user_id = ?"
     params: List = [user_id]
@@ -148,6 +181,11 @@ def get_feed_items(
     if status_filter != "all":
         query += " AND status = ?"
         params.append(status_filter)
+
+    if search_query.strip():
+        like_q = f"%{search_query.strip()}%"
+        query += " AND (LOWER(title) LIKE LOWER(?) OR LOWER(body) LIKE LOWER(?) OR LOWER(sender) LIKE LOWER(?))"
+        params.extend([like_q, like_q, like_q])
 
     query += " ORDER BY created_at DESC"
 

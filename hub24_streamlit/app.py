@@ -201,7 +201,6 @@ def render_dashboard() -> None:
         st.subheader("🧪 Sample 24h Data")
         st.caption("Populate realistic last-24h items across WhatsApp, Email, Calls, and Tasks to test right away.")
         if st.button("Load Sample 24h Items", use_container_width=True):
-            for sample in get_sample_24h_items():
                 add_feed_item(
                     user_id=user["id"],
                     channel=sample["channel"],

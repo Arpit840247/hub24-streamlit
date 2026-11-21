@@ -1,7 +1,6 @@
 import email
 from email.header import decode_header
 import imaplib
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -9,25 +8,25 @@ CHANNELS: List[Dict[str, str]] = [
     {
         "id": "whatsapp",
         "name": "WhatsApp",
-        "subtitle": "Last 24h quick logs & commands",
+        "subtitle": "Last 24h messages, logs & replies",
         "icon": "💬",
     },
     {
         "id": "email",
         "name": "Email",
-        "subtitle": "Live last-24h inbox sync + logs",
+        "subtitle": "Live last-24h inbox & threads",
         "icon": "📧",
     },
     {
         "id": "calls",
         "name": "Phone & Calls",
-        "subtitle": "Last 24h call actions & callbacks",
+        "subtitle": "Last 24h call logs & callbacks",
         "icon": "📞",
     },
     {
         "id": "tasks",
         "name": "Tasks & Routine",
-        "subtitle": "Last 24h reminders & study/work blocks",
+        "subtitle": "Last 24h tasks, study & schedule blocks",
         "icon": "✅",
     },
 ]
@@ -79,7 +78,6 @@ def fetch_recent_emails_24h(
         return False, "Email address and App Password are required.", []
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    # IMAP SINCE uses date granularity (day before cutoff ensures timezone safety)
     imap_since_date = (cutoff - timedelta(days=1)).strftime("%d-%b-%Y")
 
     items: List[Dict] = []
@@ -137,44 +135,3 @@ def fetch_recent_emails_24h(
         return False, f"IMAP login/auth failed: {exc}", []
     except Exception as exc:
         return False, f"Could not sync email: {exc}", []
-
-
-def get_sample_24h_items() -> List[Dict]:
-    now = datetime.now(timezone.utc)
-    return [
-        {
-            "channel": "whatsapp",
-            "sender": "Rohan Sharma",
-            "title": "Project demo timing",
-            "body": "Hey, can we review the prototype around 6 PM today?",
-            "created_at": now - timedelta(hours=2),
-        },
-        {
-            "channel": "whatsapp",
-            "sender": "Dev Group",
-            "title": "Build notes & links",
-            "body": "Shared the updated deployment checklist in the group.",
-            "created_at": now - timedelta(hours=7),
-        },
-        {
-            "channel": "email",
-            "sender": "HR / Talent Team",
-            "title": "Interview availability confirmation",
-            "body": "Please confirm your preferred slot for the technical round.",
-            "created_at": now - timedelta(hours=4),
-        },
-        {
-            "channel": "calls",
-            "sender": "+91 98XXX XXXXX",
-            "title": "Missed incoming call",
-            "body": "Call missed 3 hours ago — call back to confirm delivery/meeting.",
-            "created_at": now - timedelta(hours=3),
-        },
-        {
-            "channel": "tasks",
-            "sender": "Personal Routine",
-            "title": "Core build sprint + evening revision",
-            "body": "Complete real email sync and verify 24h feed workflow.",
-            "created_at": now - timedelta(hours=1),
-        },
-    ]

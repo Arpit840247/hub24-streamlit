@@ -36,12 +36,22 @@ def init_db() -> None:
                 sender TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
+                action_note TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'unread',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
             """
         )
+        # Safe migration if upgrading from an older table without action_note
+        cols = [
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(feed_items)").fetchall()
+        ]
+        if "action_note" not in cols:
+            conn.execute(
+                "ALTER TABLE feed_items ADD COLUMN action_note TEXT NOT NULL DEFAULT ''"
+            )
         conn.commit()
 
 
@@ -117,8 +127,8 @@ def add_feed_item(
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO feed_items (user_id, channel, sender, title, body, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'unread', ?)
+            INSERT INTO feed_items (user_id, channel, sender, title, body, action_note, status, created_at)
+            VALUES (?, ?, ?, ?, ?, '', 'unread', ?)
             """,
             (user_id, channel.lower(), sender.strip(), title.strip(), body.strip(), ts),
         )
@@ -184,8 +194,8 @@ def get_feed_items(
 
     if search_query.strip():
         like_q = f"%{search_query.strip()}%"
-        query += " AND (LOWER(title) LIKE LOWER(?) OR LOWER(body) LIKE LOWER(?) OR LOWER(sender) LIKE LOWER(?))"
-        params.extend([like_q, like_q, like_q])
+        query += " AND (LOWER(title) LIKE LOWER(?) OR LOWER(body) LIKE LOWER(?) OR LOWER(sender) LIKE LOWER(?) OR LOWER(action_note) LIKE LOWER(?))"
+        params.extend([like_q, like_q, like_q, like_q])
 
     query += " ORDER BY created_at DESC"
 
@@ -199,6 +209,15 @@ def update_item_status(user_id: int, item_id: int, new_status: str) -> None:
         conn.execute(
             "UPDATE feed_items SET status = ? WHERE id = ? AND user_id = ?",
             (new_status, item_id, user_id),
+        )
+        conn.commit()
+
+
+def update_action_note(user_id: int, item_id: int, note: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE feed_items SET action_note = ? WHERE id = ? AND user_id = ?",
+            (note.strip(), item_id, user_id),
         )
         conn.commit()
 

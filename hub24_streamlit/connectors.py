@@ -1,6 +1,9 @@
 import email
 from email.header import decode_header
+from email.message import EmailMessage
+from email.utils import parseaddr
 import imaplib
+import smtplib
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -8,25 +11,25 @@ CHANNELS: List[Dict[str, str]] = [
     {
         "id": "whatsapp",
         "name": "WhatsApp",
-        "subtitle": "Last 24h messages, logs & replies",
+        "subtitle": "24h messages, logs & replies",
         "icon": "💬",
     },
     {
         "id": "email",
         "name": "Email",
-        "subtitle": "Live last-24h inbox & threads",
+        "subtitle": "Live 24h inbox & replies",
         "icon": "📧",
     },
     {
         "id": "calls",
         "name": "Phone & Calls",
-        "subtitle": "Last 24h call logs & callbacks",
+        "subtitle": "24h call logs & callbacks",
         "icon": "📞",
     },
     {
         "id": "tasks",
         "name": "Tasks & Routine",
-        "subtitle": "Last 24h tasks, study & schedule blocks",
+        "subtitle": "24h tasks, study & blocks",
         "icon": "✅",
     },
 ]
@@ -65,6 +68,11 @@ def _extract_body(msg: email.message.Message) -> str:
             charset = msg.get_content_charset() or "utf-8"
             return payload.decode(charset, errors="replace").strip()
     return "(No plain-text preview available)"
+
+
+def extract_email_address(raw_sender: str) -> str:
+    _, addr = parseaddr(raw_sender or "")
+    return addr.strip()
 
 
 def fetch_recent_emails_24h(
@@ -135,3 +143,37 @@ def fetch_recent_emails_24h(
         return False, f"IMAP login/auth failed: {exc}", []
     except Exception as exc:
         return False, f"Could not sync email: {exc}", []
+
+
+def send_email_smtp(
+    sender_email: str,
+    app_password: str,
+    to_email: str,
+    subject: str,
+    message_text: str,
+    smtp_host: str = "smtp.gmail.com",
+    smtp_port: int = 465,
+) -> Tuple[bool, str]:
+    """Sends a real email via SMTP over SSL."""
+    if not sender_email or not app_password:
+        return False, "Configure Email Address & App Password in Live 24h Email Sync first."
+    if not to_email or "@" not in to_email:
+        return False, "Please enter a valid recipient email address."
+    if not message_text.strip():
+        return False, "Message body cannot be empty."
+
+    msg = EmailMessage()
+    msg["From"] = sender_email.strip()
+    msg["To"] = to_email.strip()
+    msg["Subject"] = subject.strip() or "(No Subject)"
+    msg.set_content(message_text.strip())
+
+    try:
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15) as server:
+            server.login(sender_email.strip(), app_password.strip())
+            server.send_message(msg)
+        return True, f"Email sent to {to_email.strip()}."
+    except smtplib.SMTPAuthenticationError:
+        return False, "SMTP authentication failed. Check your App Password."
+    except Exception as exc:
+        return False, f"Failed to send email: {exc}"

@@ -37,13 +37,14 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
                 action_note TEXT NOT NULL DEFAULT '',
+                priority TEXT NOT NULL DEFAULT 'normal',
                 status TEXT NOT NULL DEFAULT 'unread',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
             """
         )
-        # Safe migration if upgrading from an older table without action_note
+
         cols = [
             row["name"]
             for row in conn.execute("PRAGMA table_info(feed_items)").fetchall()
@@ -52,6 +53,17 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE feed_items ADD COLUMN action_note TEXT NOT NULL DEFAULT ''"
             )
+        if "priority" not in cols:
+            conn.execute(
+                "ALTER TABLE feed_items ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"
+            )
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feed_user_time ON feed_items(user_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_feed_user_ch_status ON feed_items(user_id, channel, status)"
+        )
         conn.commit()
 
 
@@ -122,15 +134,17 @@ def add_feed_item(
     title: str,
     body: str,
     created_at: Optional[datetime] = None,
+    priority: str = "normal",
 ) -> None:
     ts = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    prio = priority if priority in {"normal", "high"} else "normal"
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO feed_items (user_id, channel, sender, title, body, action_note, status, created_at)
-            VALUES (?, ?, ?, ?, ?, '', 'unread', ?)
+            INSERT INTO feed_items (user_id, channel, sender, title, body, action_note, priority, status, created_at)
+            VALUES (?, ?, ?, ?, ?, '', ?, 'unread', ?)
             """,
-            (user_id, channel.lower(), sender.strip(), title.strip(), body.strip(), ts),
+            (user_id, channel.lower(), sender.strip(), title.strip(), body.strip(), prio, ts),
         )
         conn.commit()
 
@@ -194,10 +208,13 @@ def get_feed_items(
 
     if search_query.strip():
         like_q = f"%{search_query.strip()}%"
-        query += " AND (LOWER(title) LIKE LOWER(?) OR LOWER(body) LIKE LOWER(?) OR LOWER(sender) LIKE LOWER(?) OR LOWER(action_note) LIKE LOWER(?))"
+        query += (
+            " AND (LOWER(title) LIKE LOWER(?) OR LOWER(body) LIKE LOWER(?)"
+            " OR LOWER(sender) LIKE LOWER(?) OR LOWER(action_note) LIKE LOWER(?))"
+        )
         params.extend([like_q, like_q, like_q, like_q])
 
-    query += " ORDER BY created_at DESC"
+    query += " ORDER BY CASE WHEN priority = 'high' THEN 0 ELSE 1 END, created_at DESC"
 
     with get_connection() as conn:
         rows = conn.execute(query, params).fetchall()
@@ -218,6 +235,20 @@ def update_action_note(user_id: int, item_id: int, note: str) -> None:
         conn.execute(
             "UPDATE feed_items SET action_note = ? WHERE id = ? AND user_id = ?",
             (note.strip(), item_id, user_id),
+        )
+        conn.commit()
+
+
+def carry_item_24h(user_id: int, item_id: int) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE feed_items
+            SET created_at = ?, status = 'followup'
+            WHERE id = ? AND user_id = ?
+            """,
+            (now_iso, item_id, user_id),
         )
         conn.commit()
 

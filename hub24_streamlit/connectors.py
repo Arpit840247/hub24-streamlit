@@ -4,6 +4,7 @@ from email.message import EmailMessage
 from email.utils import parseaddr
 import imaplib
 import smtplib
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -177,3 +178,34 @@ def send_email_smtp(
         return False, "SMTP authentication failed. Check your App Password."
     except Exception as exc:
         return False, f"Failed to send email: {exc}"
+
+
+def send_mobile_alert(
+    topic: str,
+    title: str,
+    message: str,
+    priority: str = "high",
+) -> Tuple[bool, str]:
+    """Sends a concise real-world push alert to a subscribed mobile topic via ntfy.sh."""
+    clean_topic = topic.strip()
+    if not clean_topic:
+        return False, "Enter a topic name first."
+
+    url = f"https://ntfy.sh/{clean_topic}"
+    try:
+        req = urllib.request.Request(
+            url,
+            data=message.strip().encode("utf-8"),
+            headers={
+                "Title": title.strip()[:120] or "Hub24 Alert",
+                "Priority": "urgent" if priority == "high" else "default",
+                "Tags": "zap",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                return True, "Alert sent to your phone."
+            return False, f"Alert request failed (HTTP {resp.status})."
+    except Exception as exc:
+        return False, f"Could not send alert: {exc}"

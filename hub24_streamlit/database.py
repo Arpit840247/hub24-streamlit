@@ -1,11 +1,13 @@
 import hashlib
-import secrets
+import hmac
+import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-DB_PATH = Path(__file__).parent / "hub24.db"
+DB_PATH = os.getenv("HUB24_DB_PATH", "hub24.db")
+EMAIL_REGEX = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
 
 
 def get_connection() -> sqlite3.Connection:
@@ -21,8 +23,9 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
-                email TEXT UNIQUE NOT NULL,
+                email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )
             """
@@ -36,95 +39,96 @@ def init_db() -> None:
                 sender TEXT NOT NULL,
                 title TEXT NOT NULL,
                 body TEXT NOT NULL,
-                action_note TEXT NOT NULL DEFAULT '',
-                priority TEXT NOT NULL DEFAULT 'normal',
                 status TEXT NOT NULL DEFAULT 'unread',
+                priority TEXT NOT NULL DEFAULT 'normal',
+                action_note TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
             """
         )
-
-        cols = [
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(feed_items)").fetchall()
-        ]
-        if "action_note" not in cols:
-            conn.execute(
-                "ALTER TABLE feed_items ADD COLUMN action_note TEXT NOT NULL DEFAULT ''"
-            )
-        if "priority" not in cols:
-            conn.execute(
-                "ALTER TABLE feed_items ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'"
-            )
-
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_feed_user_time ON feed_items(user_id, created_at)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_feed_user_ch_status ON feed_items(user_id, channel, status)"
+            "CREATE INDEX IF NOT EXISTS idx_feed_user_time ON feed_items (user_id, created_at DESC)"
         )
         conn.commit()
 
 
-def _hash_password(password: str, salt: Optional[str] = None) -> str:
-    salt = salt or secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt.encode("utf-8"), 100_000
-    ).hex()
-    return f"{salt}${digest}"
+def is_valid_email(email: str) -> bool:
+    return bool(EMAIL_REGEX.match((email or "").strip()))
 
 
-def _verify_password(password: str, stored_hash: str) -> bool:
-    try:
-        salt, _ = stored_hash.split("$", 1)
-        return secrets.compare_digest(_hash_password(password, salt), stored_hash)
-    except ValueError:
-        return False
+def validate_password_strength(password: str) -> Tuple[bool, str]:
+    if not password or len(password) < 8:
+        return False, "Password must be at least 8 characters long."
+    if not re.search(r"[A-Za-z]", password):
+        return False, "Password must contain at least one letter (A-Z)."
+    if not re.search(r"\d", password):
+        return False, "Password must contain at least one number (0-9)."
+    return True, ""
+
+
+def _hash_password(password: str, salt_hex: Optional[str] = None) -> Tuple[str, str]:
+    salt = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 150_000)
+    return digest.hex(), salt.hex()
 
 
 def create_user(name: str, email: str, password: str) -> Tuple[bool, str]:
-    name = name.strip()
-    email = email.strip().lower()
-    if not name or not email or len(password) < 4:
-        return False, "Please enter name, valid email, and a password (min 4 chars)."
+    clean_name = (name or "").strip()
+    clean_email = (email or "").strip().lower()
 
+    if len(clean_name) < 2:
+        return False, "Enter your full name (at least 2 characters)."
+    if not is_valid_email(clean_email):
+        return False, "Enter a valid email address (e.g., name@gmail.com)."
+
+    ok_pw, pw_msg = validate_password_strength(password)
+    if not ok_pw:
+        return False, pw_msg
+
+    pw_hash, salt_hex = _hash_password(password)
     now_iso = datetime.now(timezone.utc).isoformat()
+
     try:
         with get_connection() as conn:
             conn.execute(
-                "INSERT INTO users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
-                (name, email, _hash_password(password), now_iso),
+                """
+                INSERT INTO users (name, email, password_hash, salt, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (clean_name, clean_email, pw_hash, salt_hex, now_iso),
             )
             conn.commit()
-        return True, "Account created! Please log in."
+        return True, "Account created successfully. You can now log in."
     except sqlite3.IntegrityError:
-        return False, "An account with this email already exists."
+        return False, "This email is already registered. Please log in."
 
 
-def authenticate_user(email: str, password: str) -> Optional[Dict]:
-    email = email.strip().lower()
+def authenticate_user(email: str, password: str) -> Tuple[Optional[Dict], str]:
+    clean_email = (email or "").strip().lower()
+    if not is_valid_email(clean_email):
+        return None, "Invalid email format. Enter a proper email address."
+    if not password:
+        return None, "Password is required."
+
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, name, email, password_hash FROM users WHERE email = ?",
-            (email,),
+            "SELECT id, name, email, password_hash, salt FROM users WHERE email = ?",
+            (clean_email,),
         ).fetchone()
-    if row and _verify_password(password, row["password_hash"]):
-        return {"id": row["id"], "name": row["name"], "email": row["email"]}
-    return None
 
+    if not row:
+        return None, "No account found with this email."
 
-def item_exists(user_id: int, channel: str, title: str, sender: str) -> bool:
-    with get_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT 1 FROM feed_items
-            WHERE user_id = ? AND channel = ? AND LOWER(title) = LOWER(?) AND LOWER(sender) = LOWER(?)
-            LIMIT 1
-            """,
-            (user_id, channel.lower(), title.strip(), sender.strip()),
-        ).fetchone()
-    return row is not None
+    computed_hash, _ = _hash_password(password, row["salt"])
+    if not hmac.compare_digest(computed_hash, row["password_hash"]):
+        return None, "Incorrect password."
+
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "email": row["email"],
+    }, "Login successful."
 
 
 def add_feed_item(
@@ -137,50 +141,36 @@ def add_feed_item(
     priority: str = "normal",
 ) -> None:
     ts = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-    prio = priority if priority in {"normal", "high"} else "normal"
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO feed_items (user_id, channel, sender, title, body, action_note, priority, status, created_at)
-            VALUES (?, ?, ?, ?, ?, '', ?, 'unread', ?)
+            INSERT INTO feed_items (user_id, channel, sender, title, body, status, priority, action_note, created_at)
+            VALUES (?, ?, ?, ?, ?, 'unread', ?, '', ?)
             """,
-            (user_id, channel.lower(), sender.strip(), title.strip(), body.strip(), prio, ts),
+            (
+                user_id,
+                channel.strip().lower(),
+                sender.strip()[:100],
+                title.strip()[:140],
+                body.strip()[:1000],
+                "high" if priority == "high" else "normal",
+                ts,
+            ),
         )
         conn.commit()
 
 
-def get_channel_counts_24h(user_id: int) -> Dict[str, int]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+def item_exists(user_id: int, channel: str, title: str, sender: str) -> bool:
     with get_connection() as conn:
-        rows = conn.execute(
+        row = conn.execute(
             """
-            SELECT channel, COUNT(*) as cnt
-            FROM feed_items
-            WHERE user_id = ? AND created_at >= ? AND status != 'done'
-            GROUP BY channel
+            SELECT 1 FROM feed_items
+            WHERE user_id = ? AND channel = ? AND title = ? AND sender = ?
+            LIMIT 1
             """,
-            (user_id, cutoff),
-        ).fetchall()
-    return {row["channel"]: row["cnt"] for row in rows}
-
-
-def get_summary_24h(user_id: int) -> Dict[str, int]:
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    with get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT status, COUNT(*) as cnt
-            FROM feed_items
-            WHERE user_id = ? AND created_at >= ?
-            GROUP BY status
-            """,
-            (user_id, cutoff),
-        ).fetchall()
-    counts = {"unread": 0, "followup": 0, "done": 0}
-    for r in rows:
-        counts[r["status"]] = r["cnt"]
-    counts["total_24h"] = sum(counts.values())
-    return counts
+            (user_id, channel, title.strip()[:140], sender.strip()[:100]),
+        ).fetchone()
+    return row is not None
 
 
 def get_feed_items(
@@ -190,35 +180,76 @@ def get_feed_items(
     status_filter: str = "all",
     search_query: str = "",
 ) -> List[Dict]:
-    query = "SELECT * FROM feed_items WHERE user_id = ?"
+    clauses = ["user_id = ?"]
     params: List = [user_id]
 
-    if channel and channel != "all":
-        query += " AND channel = ?"
-        params.append(channel.lower())
+    if channel:
+        clauses.append("channel = ?")
+        params.append(channel)
 
     if only_24h:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        query += " AND created_at >= ?"
+        clauses.append("created_at >= ?")
         params.append(cutoff)
 
     if status_filter != "all":
-        query += " AND status = ?"
+        clauses.append("status = ?")
         params.append(status_filter)
 
     if search_query.strip():
-        like_q = f"%{search_query.strip()}%"
-        query += (
-            " AND (LOWER(title) LIKE LOWER(?) OR LOWER(body) LIKE LOWER(?)"
-            " OR LOWER(sender) LIKE LOWER(?) OR LOWER(action_note) LIKE LOWER(?))"
-        )
-        params.extend([like_q, like_q, like_q, like_q])
+        q = f"%{search_query.strip()}%"
+        clauses.append("(sender LIKE ? OR title LIKE ? OR body LIKE ? OR action_note LIKE ?)")
+        params.extend([q, q, q, q])
 
-    query += " ORDER BY CASE WHEN priority = 'high' THEN 0 ELSE 1 END, created_at DESC"
-
+    where_sql = " AND ".join(clauses)
+    query = f"""
+        SELECT id, channel, sender, title, body, status, priority, action_note, created_at
+        FROM feed_items
+        WHERE {where_sql}
+        ORDER BY CASE priority WHEN 'high' THEN 0 ELSE 1 END, created_at DESC
+    """
     with get_connection() as conn:
         rows = conn.execute(query, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_channel_counts_24h(user_id: int) -> Dict[str, int]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT channel, COUNT(*) AS cnt
+            FROM feed_items
+            WHERE user_id = ? AND created_at >= ? AND status != 'done'
+            GROUP BY channel
+            """,
+            (user_id, cutoff),
+        ).fetchall()
+    return {r["channel"]: r["cnt"] for r in rows}
+
+
+def get_summary_24h(user_id: int) -> Dict[str, int]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT status, COUNT(*) AS cnt
+            FROM feed_items
+            WHERE user_id = ? AND created_at >= ?
+            GROUP BY status
+            """,
+            (user_id, cutoff),
+        ).fetchall()
+    counts = {r["status"]: r["cnt"] for r in rows}
+    unread = counts.get("unread", 0)
+    followup = counts.get("followup", 0)
+    done = counts.get("done", 0)
+    return {
+        "total_24h": unread + followup + done,
+        "unread": unread,
+        "followup": followup,
+        "done": done,
+    }
 
 
 def update_item_status(user_id: int, item_id: int, new_status: str) -> None:
@@ -234,7 +265,7 @@ def update_action_note(user_id: int, item_id: int, note: str) -> None:
     with get_connection() as conn:
         conn.execute(
             "UPDATE feed_items SET action_note = ? WHERE id = ? AND user_id = ?",
-            (note.strip(), item_id, user_id),
+            (note.strip()[:500], item_id, user_id),
         )
         conn.commit()
 
@@ -243,11 +274,7 @@ def carry_item_24h(user_id: int, item_id: int) -> None:
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
         conn.execute(
-            """
-            UPDATE feed_items
-            SET created_at = ?, status = 'followup'
-            WHERE id = ? AND user_id = ?
-            """,
+            "UPDATE feed_items SET created_at = ? WHERE id = ? AND user_id = ?",
             (now_iso, item_id, user_id),
         )
         conn.commit()
